@@ -1,19 +1,15 @@
-import asyncio
 import logging
 import os
 import tempfile
-import time
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import gemma, measure
-from .config import GEMMA_MODEL, MAX_UPLOAD_MB, WHISPER_MODEL
-from .frames import sample_frames
-from .transcribe import transcribe
+from . import jobs
+from .config import MAX_UPLOAD_MB, MODES, WHISPER_MODEL
+from .options import Options, Rules
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("adlint")
 
 app = FastAPI(title="adlint")
 app.add_middleware(
@@ -30,80 +26,67 @@ LANGUAGES = {"auto": None, "hi": "hi", "en": "en", "gu": "gu"}
 def health():
     return {
         "ok": True,
-        "model": GEMMA_MODEL,
+        "modes": {k: v["model"] for k, v in MODES.items()},
         "whisper": WHISPER_MODEL,
         "api_key_set": bool(os.getenv("GEMINI_API_KEY")),
     }
 
 
-@app.post("/api/analyze")
-async def analyze(
+@app.post("/api/jobs")
+async def create_job(
     video: UploadFile = File(...),
+    mode: str = Form("fast"),
     language: str = Form("auto"),
     script: str = Form(""),
+    check_bias: bool = Form(True),
+    check_claims: bool = Form(True),
+    recheck: bool = Form(True),
+    min_disclaimer_seconds: float = Form(Rules.min_disclaimer_seconds),
+    min_text_height_pct: float = Form(Rules.min_text_height_pct),
+    reading_words_per_sec: float = Form(Rules.reading_words_per_sec),
 ):
     if not os.getenv("GEMINI_API_KEY"):
         raise HTTPException(500, "GEMINI_API_KEY is not set in backend/.env")
+    if mode not in MODES:
+        raise HTTPException(400, f"mode must be one of {list(MODES)}")
     if language not in LANGUAGES:
         raise HTTPException(400, f"language must be one of {list(LANGUAGES)}")
+    if not (check_bias or check_claims):
+        raise HTTPException(400, "Select at least one check")
+    if reading_words_per_sec <= 0:
+        raise HTTPException(400, "reading_words_per_sec must be positive")
 
     suffix = os.path.splitext(video.filename or "")[1] or ".mp4"
     fd, path = tempfile.mkstemp(suffix=suffix)
-    timings: dict[str, float] = {}
-    try:
-        size = 0
-        with os.fdopen(fd, "wb") as out:
-            while chunk := await video.read(1 << 20):
-                size += len(chunk)
-                if size > MAX_UPLOAD_MB * (1 << 20):
-                    raise HTTPException(413, f"Video is larger than {MAX_UPLOAD_MB} MB")
-                out.write(chunk)
+    size = 0
+    with os.fdopen(fd, "wb") as out:
+        while chunk := await video.read(1 << 20):
+            size += len(chunk)
+            if size > MAX_UPLOAD_MB * (1 << 20):
+                out.close()
+                os.remove(path)
+                raise HTTPException(413, f"Video is larger than {MAX_UPLOAD_MB} MB")
+            out.write(chunk)
 
-        t0 = time.perf_counter()
-        try:
-            (info, frames), transcript = await asyncio.gather(
-                asyncio.to_thread(sample_frames, path),
-                asyncio.to_thread(transcribe, path, LANGUAGES[language]),
-            )
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
-        timings["extract_s"] = round(time.perf_counter() - t0, 1)
+    opts = Options(
+        mode=mode,
+        language=LANGUAGES[language],
+        script=script.strip() or None,
+        check_bias=check_bias,
+        check_claims=check_claims,
+        recheck=recheck,
+        rules=Rules(
+            min_disclaimer_seconds=min_disclaimer_seconds,
+            min_text_height_pct=min_text_height_pct,
+            reading_words_per_sec=reading_words_per_sec,
+        ),
+    )
+    return jobs.create(path, opts).public()
 
-        t1 = time.perf_counter()
-        try:
-            raw = await asyncio.to_thread(gemma.analyze, frames, transcript, script.strip() or None)
-        except Exception as exc:
-            log.exception("Gemma analysis failed")
-            raise HTTPException(502, f"Gemma analysis failed: {exc}")
-        timings["analyze_s"] = round(time.perf_counter() - t1, 1)
 
-        t2 = time.perf_counter()
-        bias = await asyncio.to_thread(gemma.verify_bias, raw["bias_flags"], frames, transcript, info.interval)
-        timings["verify_s"] = round(time.perf_counter() - t2, 1)
-
-        spans = measure.disclaimer_spans(raw["disclaimers"], info.interval)
-        claims = measure.match_claims(raw["claims"], spans)
-        report = measure.build_report(bias, claims, spans)
-
-        return {
-            "video": {
-                "duration": info.duration,
-                "width": info.width,
-                "height": info.height,
-                "frame_interval": info.interval,
-                "frames_analyzed": len(frames),
-            },
-            "transcript": transcript,
-            "bias_flags": bias,
-            "bias_flags_dropped": len(raw["bias_flags"]) - len(bias),
-            "claims": claims,
-            "disclaimers": spans,
-            **report,
-            "model": raw["model"],
-            "timings": timings,
-        }
-    finally:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str):
+    job = jobs.JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    return job.public()

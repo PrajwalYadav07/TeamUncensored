@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 import cv2
 
-from .config import FRAME_MAX_SIDE, MAX_FRAMES
+from .config import MAX_FRAMES
 
 
 @dataclass
@@ -22,7 +22,7 @@ class VideoInfo:
     interval: float
 
 
-def sample_frames(path: str) -> tuple[VideoInfo, list[Frame]]:
+def sample_frames(path: str, max_side: int = 768) -> tuple[VideoInfo, list[Frame]]:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError("Could not open video file")
@@ -43,7 +43,7 @@ def sample_frames(path: str) -> tuple[VideoInfo, list[Frame]]:
         times.append(round(t, 2))
         t += interval
 
-    scale = min(1.0, FRAME_MAX_SIDE / max(width, height))
+    scale = min(1.0, max_side / max(width, height))
     frames: list[Frame] = []
     for i, t in enumerate(times):
         cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)

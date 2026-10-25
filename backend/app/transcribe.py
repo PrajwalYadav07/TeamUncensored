@@ -45,7 +45,7 @@ def load_audio(path: str) -> np.ndarray | None:
     return np.concatenate(chunks, axis=1).reshape(-1).astype(np.float32) / 32768.0
 
 
-def transcribe(path: str, language: str | None = None) -> dict:
+def transcribe(path: str, language: str | None = None, beam_size: int = 5) -> dict:
     """Returns {"language": str | None, "segments": [{"start", "end", "text", "words": [...]}]}."""
     try:
         audio = load_audio(path)
@@ -56,7 +56,7 @@ def transcribe(path: str, language: str | None = None) -> dict:
             language=language or None,
             word_timestamps=True,
             vad_filter=True,
-            beam_size=5,
+            beam_size=beam_size,
         )
         out = []
         for seg in segments:

@@ -1,13 +1,7 @@
 import re
 from difflib import SequenceMatcher
 
-from .config import (
-    CLAIM_WINDOW_AFTER,
-    CLAIM_WINDOW_BEFORE,
-    MIN_DISCLAIMER_SECONDS,
-    MIN_TEXT_HEIGHT_PCT,
-    READING_WORDS_PER_SEC,
-)
+from .options import Rules
 
 SEVERITY_PENALTY = {"high": 20, "medium": 12, "low": 5}
 UNSUPPORTED_CLAIM_PENALTY = 10
@@ -26,7 +20,7 @@ def _num(value, default=0.0) -> float:
         return default
 
 
-def disclaimer_spans(entries: list[dict], interval: float) -> list[dict]:
+def disclaimer_spans(entries: list[dict], interval: float, rules: Rules) -> list[dict]:
     """Merge per-frame disclaimer sightings into continuous on-screen spans."""
     entries = sorted(
         (e for e in entries if isinstance(e.get("box_2d"), list) and len(e["box_2d"]) == 4),
@@ -61,12 +55,12 @@ def disclaimer_spans(entries: list[dict], interval: float) -> list[dict]:
             boxes.append([ymin, xmin, ymax, xmax])
         duration = round(s["_last"] - s["start"] + interval, 2)
         words = len(_norm(s["text"]).split())
-        required = round(max(MIN_DISCLAIMER_SECONDS, words / READING_WORDS_PER_SEC), 1)
+        required = round(max(rules.min_disclaimer_seconds, words / rules.reading_words_per_sec), 1)
         text_height = round(sum(heights) / len(heights), 2) if heights else 0.0
         issues = []
         if duration < required:
             issues.append("too_short")
-        if text_height < MIN_TEXT_HEIGHT_PCT:
+        if text_height < rules.min_text_height_pct:
             issues.append("too_small")
         out.append(
             {
@@ -77,7 +71,7 @@ def disclaimer_spans(entries: list[dict], interval: float) -> list[dict]:
                 "required_duration": required,
                 "word_count": words,
                 "text_height_pct": text_height,
-                "min_text_height_pct": MIN_TEXT_HEIGHT_PCT,
+                "min_text_height_pct": rules.min_text_height_pct,
                 "box_2d": boxes[len(boxes) // 2],
                 "issues": issues,
             }
@@ -85,11 +79,44 @@ def disclaimer_spans(entries: list[dict], interval: float) -> list[dict]:
     return out
 
 
-def match_claims(claims: list[dict], spans: list[dict]) -> list[dict]:
+def dedupe_claims(claims: list[dict]) -> list[dict]:
+    """Keep the first sighting of each distinct claim per source."""
+    out, seen = [], []
+    for c in sorted(claims, key=lambda c: _num(c.get("time"))):
+        key = (c.get("source"), _norm(c.get("text") or ""))
+        if any(k[0] == key[0] and SequenceMatcher(None, k[1], key[1]).ratio() >= 0.85 for k in seen):
+            continue
+        seen.append(key)
+        out.append(c)
+    return out
+
+
+def merge_bias(flags: list[dict], interval: float) -> list[dict]:
+    """Merge flags of the same category whose time ranges touch, e.g. one scene split across frame batches."""
+    rank = {"low": 0, "medium": 1, "high": 2}
+    merged: list[dict] = []
+    for f in sorted(flags, key=lambda f: _num(f.get("start"))):
+        if not isinstance(f, dict) or not f.get("category"):
+            continue
+        start = _num(f.get("start"))
+        end = max(start, _num(f.get("end"), start))
+        for m in merged:
+            if m.get("category") == f.get("category") and m.get("source") == f.get("source") and start <= _num(m["end"]) + interval:
+                m["end"] = max(_num(m["end"]), end)
+                if rank.get(f.get("severity"), 1) > rank.get(m.get("severity"), 1):
+                    m["severity"] = f.get("severity")
+                m["confidence"] = max(_num(m.get("confidence")), _num(f.get("confidence")))
+                break
+        else:
+            merged.append({**f, "start": start, "end": end})
+    return merged
+
+
+def match_claims(claims: list[dict], spans: list[dict], rules: Rules) -> list[dict]:
     out = []
-    for c in claims:
+    for c in sorted(claims, key=lambda c: _num(c.get("time"))):
         t = _num(c.get("time"))
-        lo, hi = t - CLAIM_WINDOW_BEFORE, t + CLAIM_WINDOW_AFTER
+        lo, hi = t - rules.claim_window_before, t + rules.claim_window_after
         covering = [i for i, s in enumerate(spans) if s["start"] <= hi and s["end"] >= lo]
         needs = bool(c.get("needs_disclaimer", True))
         out.append(

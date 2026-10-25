@@ -1,4 +1,9 @@
 export type Severity = "low" | "medium" | "high";
+export type FindingKind = "bias" | "claim" | "disclaimer";
+export type JobStatus = "running" | "done" | "error";
+export type StageState = "pending" | "running" | "done" | "error" | "skipped";
+export type Mode = "fast" | "accurate";
+export type ReviewMark = "open" | "approved" | "false_positive";
 
 export interface Word {
   start: number;
@@ -11,6 +16,12 @@ export interface Segment {
   end: number;
   text: string;
   words: Word[];
+}
+
+export interface Transcript {
+  language: string | null;
+  segments: Segment[];
+  error?: string;
 }
 
 export interface BiasFlag {
@@ -52,7 +63,7 @@ export interface DisclaimerSpan {
 
 export interface Finding {
   id: string;
-  kind: "bias" | "claim" | "disclaimer";
+  kind: FindingKind;
   start: number;
   end: number;
   severity: Severity;
@@ -60,15 +71,34 @@ export interface Finding {
   detail: BiasFlag | Claim | DisclaimerSpan;
 }
 
+export interface Rules {
+  min_disclaimer_seconds: number;
+  min_text_height_pct: number;
+  reading_words_per_sec: number;
+  claim_window_before?: number;
+  claim_window_after?: number;
+}
+
+export interface ReportSettings {
+  mode: Mode;
+  check_bias: boolean;
+  check_claims: boolean;
+  recheck: boolean;
+  language: string;
+  rules: Rules;
+}
+
+export interface VideoInfo {
+  duration: number;
+  width: number;
+  height: number;
+  frame_interval: number;
+  frames_analyzed: number;
+}
+
 export interface Report {
-  video: {
-    duration: number;
-    width: number;
-    height: number;
-    frame_interval: number;
-    frames_analyzed: number;
-  };
-  transcript: { language: string | null; segments: Segment[]; error?: string };
+  video: VideoInfo;
+  transcript: Transcript;
   bias_flags: BiasFlag[];
   bias_flags_dropped: number;
   claims: Claim[];
@@ -76,6 +106,24 @@ export interface Report {
   score: number;
   verdict: string;
   findings: Finding[];
-  model: string;
-  timings: Record<string, number>;
+  settings: ReportSettings;
+  models: string[];
+  visual_batches: number;
+  whisper: string;
+  total_seconds: number;
+}
+
+export interface Stage {
+  key: string;
+  label: string;
+  state: StageState;
+  seconds: number | null;
+}
+
+export interface Job {
+  id: string;
+  status: JobStatus;
+  stages: Stage[];
+  result: Report | null;
+  error: string | null;
 }
