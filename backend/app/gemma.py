@@ -1,11 +1,12 @@
 import json
 import logging
 import re
+import time
 
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
-from .config import GEMMA_MODEL, GEMMA_THINKING
+from .config import GEMMA_ATTEMPTS, GEMMA_FALLBACK_MODEL, GEMMA_MODEL, GEMMA_THINKING
 from .frames import Frame
 from .prompts import ANALYZE_SYSTEM, VERIFY_SYSTEM, transcript_block
 
@@ -43,15 +44,29 @@ def _frame_parts(frames: list[Frame]) -> list:
     return parts
 
 
-def _generate(system: str, parts: list) -> dict:
+def _generate(system: str, parts: list) -> tuple[dict, str]:
+    """Returns (parsed JSON, model that answered). Retries 5xx and bad JSON, then falls back to a second model."""
     config = types.GenerateContentConfig(
         system_instruction=system,
         response_mime_type="application/json",
         temperature=0.2,
         thinking_config=types.ThinkingConfig(thinking_level=GEMMA_THINKING),
     )
-    resp = client().models.generate_content(model=GEMMA_MODEL, contents=parts, config=config)
-    return _parse_json(resp.text)
+    models = [GEMMA_MODEL] + ([GEMMA_FALLBACK_MODEL] if GEMMA_FALLBACK_MODEL and GEMMA_FALLBACK_MODEL != GEMMA_MODEL else [])
+    last_exc: Exception | None = None
+    for model in models:
+        for attempt in range(GEMMA_ATTEMPTS):
+            try:
+                resp = client().models.generate_content(model=model, contents=parts, config=config)
+                return _parse_json(resp.text), model
+            except errors.ServerError as exc:
+                last_exc = exc
+            except json.JSONDecodeError as exc:
+                last_exc = exc
+            log.warning("%s attempt %d failed: %s", model, attempt + 1, str(last_exc)[:120])
+            time.sleep(1.5 * (attempt + 1))
+    assert last_exc is not None
+    raise last_exc
 
 
 def analyze(frames: list[Frame], transcript: dict, script: str | None) -> dict:
@@ -60,11 +75,12 @@ def analyze(frames: list[Frame], transcript: dict, script: str | None) -> dict:
     if script:
         parts.append("SCRIPT PROVIDED BY THE USER (may include lines the transcript missed):\n" + script)
     parts.append("Review this ad now and return the JSON object.")
-    data = _generate(ANALYZE_SYSTEM, parts)
+    data, model = _generate(ANALYZE_SYSTEM, parts)
     return {
         "bias_flags": data.get("bias_flags") or [],
         "claims": data.get("claims") or [],
         "disclaimers": data.get("disclaimers") or [],
+        "model": model,
     }
 
 
@@ -90,7 +106,7 @@ def verify_bias(flags: list[dict], frames: list[Frame], transcript: dict, interv
     parts.append("CANDIDATE FLAGS:\n" + json.dumps(candidates, ensure_ascii=False, indent=1))
 
     try:
-        verdicts = {v["id"]: v for v in _generate(VERIFY_SYSTEM, parts).get("verdicts", [])}
+        verdicts = {v["id"]: v for v in _generate(VERIFY_SYSTEM, parts)[0].get("verdicts", [])}
     except Exception as exc:
         log.warning("Verification pass failed, keeping unverified flags: %s", exc)
         return [{**fl, "verified": False} for fl in flags]

@@ -99,7 +99,7 @@ async def analyze(
             "claims": claims,
             "disclaimers": spans,
             **report,
-            "model": GEMMA_MODEL,
+            "model": raw["model"],
             "timings": timings,
         }
     finally:

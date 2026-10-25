@@ -123,7 +123,7 @@ function Results({ report, videoUrl }: { report: Report; videoUrl: string }) {
   return (
     <>
       <section className="panel summary">
-        <div className={`score ${report.score >= 85 ? "good" : report.score >= 60 ? "warn" : "bad"}`}>
+        <div className={`score ${report.verdict === "ready" ? "good" : report.verdict === "high risk" ? "bad" : "warn"}`}>
           <strong>{report.score}</strong>
           <span>{report.verdict}</span>
         </div>

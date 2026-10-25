@@ -11,8 +11,8 @@ from .config import (
 
 SEVERITY_PENALTY = {"high": 20, "medium": 12, "low": 5}
 UNSUPPORTED_CLAIM_PENALTY = 10
-SHORT_DISCLAIMER_PENALTY = 8
-SMALL_DISCLAIMER_PENALTY = 6
+SHORT_DISCLAIMER_PENALTY = 10
+SMALL_DISCLAIMER_PENALTY = 8
 
 
 def _norm(text: str) -> str:
@@ -161,5 +161,11 @@ def build_report(bias_flags: list[dict], claims: list[dict], spans: list[dict]) 
 
     findings.sort(key=lambda f: f["start"])
     score = max(0, score)
-    verdict = "ready" if score >= 85 else "fix before release" if score >= 60 else "high risk"
+    has_high = any(f["severity"] == "high" for f in findings)
+    if score >= 85 and not has_high:
+        verdict = "ready"
+    elif score >= 60:
+        verdict = "fix before release"
+    else:
+        verdict = "high risk"
     return {"score": score, "verdict": verdict, "findings": findings}

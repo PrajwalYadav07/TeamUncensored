@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 GEMMA_MODEL = os.getenv("GEMMA_MODEL", "gemma-4-31b-it")
+GEMMA_FALLBACK_MODEL = os.getenv("GEMMA_FALLBACK_MODEL", "gemma-4-26b-a4b-it")
+GEMMA_ATTEMPTS = int(os.getenv("GEMMA_ATTEMPTS", "2"))
 GEMMA_THINKING = os.getenv("GEMMA_THINKING", "high")  # "high" or "minimal"
 
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
