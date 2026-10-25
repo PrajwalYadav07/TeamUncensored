@@ -12,9 +12,13 @@ from .options import Options, Rules
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="adlint")
+
+_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+_origins += [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=_origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -29,6 +29,8 @@ const BIAS_LANES = [
   { key: "age_or_disability", label: "age / disability" },
 ] as const;
 
+const API = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
+
 const SEV_PENALTY: Record<Severity, number> = { high: 20, medium: 12, low: 5 };
 
 function fmt(s: number) {
@@ -87,6 +89,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [posting, setPosting] = useState(false);
   const [marks, setMarks] = useState<Record<string, ReviewMark>>({});
+  const [entered, setEntered] = useState(false);
 
   useEffect(() => {
     if (!file) {
@@ -104,7 +107,7 @@ export default function App() {
     let timer = 0;
     const tick = async () => {
       try {
-        const res = await fetch(`/api/jobs/${job.id}`);
+        const res = await fetch(`${API}/api/jobs/${job.id}`);
         const data = await res.json().catch(() => ({}));
         if (stop) return;
         if (!res.ok) throw new Error(errMsg(data, res.status));
@@ -143,7 +146,7 @@ export default function App() {
     body.append("min_text_height_pct", String(minH));
     body.append("reading_words_per_sec", String(wps));
     try {
-      const res = await fetch("/api/jobs", { method: "POST", body });
+      const res = await fetch(`${API}/api/jobs`, { method: "POST", body });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(errMsg(data, res.status));
       setJob(data as Job);
@@ -164,71 +167,133 @@ export default function App() {
   const reviewing = Boolean(report && videoUrl);
   const running = posting || job?.status === "running";
 
+  if (!entered) {
+    return (
+      <div className="shell">
+        <Gate onEnter={() => setEntered(true)} />
+      </div>
+    );
+  }
+
   return (
     <div className="shell">
-      <header className="topbar">
-        <div className="brand">
-          <span className="wordmark">adlint</span>
-          <span className="tag">ad compliance</span>
-        </div>
-        <div className="top-meta">
-          {job && (
-            <>
-              <span className="mono">{job.id}</span>
-              <span className={`st st-${job.status}`}>{job.status}</span>
-            </>
-          )}
-          {file && <span className="file-name">{file.name}</span>}
-          {report && (
-            <button type="button" className="ghost" onClick={() => exportJson(report, marks, job)}>
-              Export JSON
-            </button>
-          )}
-          {(job || error) && (
-            <button type="button" className="ghost" onClick={reset}>
-              New check
-            </button>
-          )}
-        </div>
-      </header>
-
       {reviewing ? (
-        <Review report={report!} videoUrl={videoUrl!} marks={marks} setMarks={setMarks} stages={job?.stages ?? []} />
+        <Review
+          report={report!}
+          videoUrl={videoUrl!}
+          marks={marks}
+          setMarks={setMarks}
+          stages={job?.stages ?? []}
+          onNew={reset}
+          onExport={() => exportJson(report!, marks, job)}
+          onHome={() => setEntered(false)}
+        />
       ) : (
         <div className="workspace setup">
-          <UploadPane file={file} videoUrl={videoUrl} onFile={setFile} />
-          <aside className="side-form">
-            {running || job?.status === "error" ? (
-              <StageList stages={job?.stages ?? []} error={job?.error || error} />
-            ) : (
-              <CheckForm
-                mode={mode}
-                setMode={setMode}
-                language={language}
-                setLanguage={setLanguage}
-                script={script}
-                setScript={setScript}
-                checkBias={checkBias}
-                setCheckBias={setCheckBias}
-                checkClaims={checkClaims}
-                setCheckClaims={setCheckClaims}
-                recheck={recheck}
-                setRecheck={setRecheck}
-                minSec={minSec}
-                setMinSec={setMinSec}
-                minH={minH}
-                setMinH={setMinH}
-                wps={wps}
-                setWps={setWps}
-                disabled={!file || posting}
-                error={error}
-                onRun={run}
-              />
-            )}
-          </aside>
+          <div className="setup-inner">
+            <div className="desk-head">
+              <button type="button" className="name-btn" onClick={() => setEntered(false)}>
+                OnlyUncensored
+              </button>
+              {file && <span className="file-name">{file.name}</span>}
+              {job && <span className={`st st-${job.status}`}>{job.status}</span>}
+            </div>
+            <UploadPane file={file} videoUrl={videoUrl} onFile={setFile} onSample={() => void loadSample(setFile, setError)} />
+            <aside className="side-form">
+              {running || job?.status === "error" ? (
+                <StageList stages={job?.stages ?? []} error={job?.error || error} posting={posting && !job} />
+              ) : (
+                <CheckForm
+                  mode={mode}
+                  setMode={setMode}
+                  language={language}
+                  setLanguage={setLanguage}
+                  script={script}
+                  setScript={setScript}
+                  checkBias={checkBias}
+                  setCheckBias={setCheckBias}
+                  checkClaims={checkClaims}
+                  setCheckClaims={setCheckClaims}
+                  recheck={recheck}
+                  setRecheck={setRecheck}
+                  minSec={minSec}
+                  setMinSec={setMinSec}
+                  minH={minH}
+                  setMinH={setMinH}
+                  wps={wps}
+                  setWps={setWps}
+                  disabled={!file || posting}
+                  error={error}
+                  onRun={run}
+                />
+              )}
+            </aside>
+          </div>
         </div>
       )}
     </div>
+  );
+}
+
+function Gate({ onEnter }: { onEnter: () => void }) {
+  const [clip, setClip] = useState<"hook" | "claim" | "disc">("disc");
+  const [struck, setStruck] = useState(false);
+  const notes = {
+    hook: "00:00  Hook is fine. The problem is later.",
+    claim: "00:03  “Kills 99.9% germs.” Spoken claim. No source on screen.",
+    disc: "00:11  Disclaimer is on screen for 0.4s. A reader needs 2s, and the type is under 2%.",
+  };
+  return (
+    <section className="gate">
+      <div className="gate-bg" aria-hidden="true">
+        <video src="/edit.mp4" autoPlay muted loop playsInline />
+        <video src="/ban.mp4" autoPlay muted loop playsInline />
+        <div className="gate-wash" />
+      </div>
+      <div className="bay" aria-hidden="false">
+        <article className="monitor">
+          <header>
+            <span>Edit bay</span>
+            <span className="mono">AD_CUT_07</span>
+          </header>
+          <div className="monitor-screen">
+            <div className="preview-line">
+              <span>NO.1 SOAP</span>
+              <span className="fine">*conditions apply</span>
+            </div>
+            <div className="timeline">
+              <button type="button" className={clip === "hook" ? "on" : ""} onClick={() => setClip("hook")}>
+                Hook
+              </button>
+              <button type="button" className={clip === "claim" ? "on" : ""} onClick={() => setClip("claim")}>
+                Claim
+              </button>
+              <button type="button" className={`bad ${clip === "disc" ? "on" : ""}`} onClick={() => setClip("disc")}>
+                Disclaimer
+              </button>
+              <i className="head" />
+            </div>
+            <p className="note">{notes[clip]}</p>
+          </div>
+        </article>
+
+        <button type="button" className={`notice ${struck ? "struck" : ""}`} onClick={() => setStruck(true)}>
+          <span className="notice-k">Platform review</span>
+          <strong>Ad rejected</strong>
+          <span>Disclaimer too small and too short to read. Page restricted for 7 days.</span>
+          <em>Strike</em>
+        </button>
+      </div>
+
+      <div className="mast">
+        <p className="mast-kicker">Before you post</p>
+        <h1>OnlyUncensored</h1>
+        <p className="mast-line">The cut looks finished. The disclaimer does not. Check it before the platform does.</p>
+        <button type="button" className="enter" onClick={onEnter}>
+          Save yourself
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -252,19 +317,32 @@ function exportJson(report: Report, marks: Record<string, ReviewMark>, job: Job 
   );
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `adlint-${job?.id ?? "report"}.json`;
+  a.download = `onlyuncensored-${job?.id ?? "report"}.json`;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+async function loadSample(onFile: (f: File) => void, onError: (s: string) => void) {
+  try {
+    const res = await fetch("/sample-ad.mp4");
+    if (!res.ok) throw new Error("Sample ad failed to load");
+    const blob = await res.blob();
+    onFile(new File([blob], "Cheerios-V8-1960.mp4", { type: "video/mp4" }));
+  } catch (e) {
+    onError(e instanceof Error ? e.message : String(e));
+  }
 }
 
 function UploadPane({
   file,
   videoUrl,
   onFile,
+  onSample,
 }: {
   file: File | null;
   videoUrl: string | null;
   onFile: (f: File | null) => void;
+  onSample: () => void;
 }) {
   const [over, setOver] = useState(false);
   const take = (list: FileList | null) => {
@@ -289,12 +367,17 @@ function UploadPane({
         {videoUrl ? (
           <video src={videoUrl} controls preload="metadata" />
         ) : (
-          <label className="drop-lab">
-            <input type="file" accept="video/*" onChange={(e) => take(e.target.files)} />
-            <span className="drop-kicker">Video</span>
-            <span>Drop an ad file here, or click to choose.</span>
-            <span className="muted">mp4 / mov · up to 200 MB</span>
-          </label>
+          <div className="drop-lab">
+            <label>
+              <input type="file" accept="video/*" onChange={(e) => take(e.target.files)} />
+              <span className="drop-kicker">Video</span>
+              <span>Drop an ad file here, or click to choose.</span>
+              <span className="muted">mp4 / mov · up to 200 MB</span>
+            </label>
+            <button type="button" className="sample-link" onClick={onSample}>
+              Use the 1960 Cheerios / V-8 ad
+            </button>
+          </div>
         )}
       </div>
       {file && (
@@ -420,10 +503,44 @@ function CheckForm(props: {
   );
 }
 
-function StageList({ stages, error }: { stages: Stage[]; error: string | null }) {
+function StageList({ stages, error, posting }: { stages: Stage[]; error: string | null; posting: boolean }) {
+  const weights: Record<string, number> = {
+    frames: 10,
+    transcribe: 18,
+    visual: 40,
+    speech: 16,
+    recheck: 12,
+    report: 4,
+  };
+  let pct = posting ? 6 : 0;
+  let label = posting ? "Sending the file" : "Starting";
+  if (stages.length) {
+    let total = 0;
+    let got = 0;
+    for (const s of stages) {
+      const w = weights[s.key] ?? 8;
+      total += w;
+      if (s.state === "done" || s.state === "skipped") got += w;
+      else if (s.state === "running") {
+        got += w * 0.45;
+        label = s.label;
+      } else if (s.state === "error") label = s.label;
+    }
+    const active = stages.find((s) => s.state === "running");
+    if (active) label = active.label;
+    pct = total ? Math.min(error ? 100 : 99, Math.round((got / total) * 100)) : pct;
+  }
   return (
     <div className="stages">
-      <h1>Running</h1>
+      <div className="runbar">
+        <div className="runbar-top">
+          <span>{error ? "Stopped" : label}</span>
+          <span className="mono">{pct}%</span>
+        </div>
+        <div className={`runbar-track ${error ? "bad" : ""}`}>
+          <i style={{ width: `${pct}%` }} />
+        </div>
+      </div>
       <ol>
         {stages.map((s) => (
           <li key={s.key} className={`sg sg-${s.state}`}>
@@ -446,12 +563,18 @@ function Review({
   marks,
   setMarks,
   stages,
+  onNew,
+  onExport,
+  onHome,
 }: {
   report: Report;
   videoUrl: string;
   marks: Record<string, ReviewMark>;
   setMarks: (m: Record<string, ReviewMark>) => void;
   stages: Stage[];
+  onNew: () => void;
+  onExport: () => void;
+  onHome: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [now, setNow] = useState(0);
@@ -543,10 +666,23 @@ function Review({
             <span>{scored.verdict}</span>
             {scored.score !== report.score && <em>was {report.score}</em>}
           </div>
-          <div className="tally">
-            <span>{counts.open} open</span>
-            <span>{counts.approved} approved</span>
-            <span>{counts.fp} false pos.</span>
+          <div className="score-side">
+            <div className="tally">
+              <span>{counts.open} open</span>
+              <span>{counts.approved} approved</span>
+              <span>{counts.fp} false pos.</span>
+            </div>
+            <div className="score-actions">
+              <button type="button" className="ghost" onClick={onExport}>
+                Export JSON
+              </button>
+              <button type="button" className="ghost" onClick={onNew}>
+                New check
+              </button>
+              <button type="button" className="ghost" onClick={onHome}>
+                OnlyUncensored
+              </button>
+            </div>
           </div>
         </div>
         <div className="finding-list">
