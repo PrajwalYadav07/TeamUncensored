@@ -63,8 +63,18 @@ def visual_system(check_bias: bool, check_claims: bool) -> str:
     )
 
 
-def speech_system(check_bias: bool, check_claims: bool) -> str:
+def speech_system(check_bias: bool, check_claims: bool, check_profanity: bool = False) -> str:
     tasks, shape = [], []
+    if check_profanity:
+        tasks.append("""Profanity: identify abusive language, sexual insults, and offensive slang in Hindi,
+English, Gujarati, or mixed speech, including Roman spellings, inflections, and censored spellings.
+This is separate from bias: profanity need not target a protected group. Quote the shortest exact
+offensive phrase from the TRANSCRIPT in its original script. Never invent an utterance, translate the
+quote, or use the supplied script as proof it was spoken. Use the transcript timestamps. Return each
+occurrence separately. Return an empty array when the transcript contains no supported evidence.""")
+        shape.append('''"profanity_flags": [{"start": 0.0, "end": 0.0, "text": "exact transcript quote",
+          "language": "hi|en|gu|hi/gu", "severity": "low|medium|high",
+          "why": "why this wording is abusive", "suggested_fix": "a concrete edit"}]''')
     if check_bias:
         tasks.append(_BIAS_RULES + ' Only judge what is said. Use source "speech".')
         shape.append('"bias_flags": [' + _BIAS_SHAPE % "speech" + "]")

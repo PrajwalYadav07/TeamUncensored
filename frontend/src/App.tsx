@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type MouseEvent, type ReactNode } from "react";
 import type {
   BiasFlag,
   Claim,
@@ -6,6 +6,7 @@ import type {
   Finding,
   Job,
   Mode,
+  ProfanityFlag,
   Report,
   ReviewMark,
   Severity,
@@ -54,13 +55,25 @@ function laneOf(category: string) {
   return BIAS_LANES.find((l) => c === l.key || c.startsWith(l.key.split("_")[0]))?.key;
 }
 
-function rescore(findings: Finding[], marks: Record<string, ReviewMark>) {
+function speechWarnings(report: Report) {
+  const reasons = [...(report.speech_assessment?.reasons ?? [])];
+  if (report.speech_assessment?.status === "needs_review" && !reasons.length) reasons.push("The speech review is incomplete.");
+  if (!report.transcript.segments.length) reasons.push("No clear speech was transcribed. Spoken content could not be checked.");
+  if (report.settings.check_profanity !== false && report.profanity_flags == null) reasons.push("Bad-word results were not included in this report. Run a new check with the updated backend.");
+  if (report.transcript.discarded_segments) reasons.push("Some speech was discarded because transcription confidence was low.");
+  if (report.transcript.language_probability != null && report.transcript.language_probability < 0.65) reasons.push("The spoken language was uncertain. Choose Hindi, English, or Gujarati explicitly and recheck the transcript.");
+  if (report.transcript.word_probability != null && report.transcript.word_probability < 0.65) reasons.push("The speech transcript contains uncertain words. Review it against the audio.");
+  return [...new Set(reasons)];
+}
+
+function rescore(report: Report, marks: Record<string, ReviewMark>) {
+  const findings = report.findings;
   let score = 100;
   let hasHigh = false;
   for (const f of findings) {
     if (marks[f.id] === "false_positive") continue;
     if (f.severity === "high") hasHigh = true;
-    if (f.kind === "bias") score -= SEV_PENALTY[f.severity] ?? 12;
+    if (f.kind === "bias" || f.kind === "profanity") score -= SEV_PENALTY[f.severity] ?? 12;
     else if (f.kind === "claim") score -= 10;
     else if (f.kind === "disclaimer") {
       const issues = (f.detail as DisclaimerSpan).issues ?? [];
@@ -69,7 +82,9 @@ function rescore(findings: Finding[], marks: Record<string, ReviewMark>) {
     }
   }
   score = Math.max(0, score);
-  const verdict = score >= 85 && !hasHigh ? "ready" : score >= 60 ? "fix before release" : "high risk";
+  const warnings = speechWarnings(report);
+  if (warnings.length || report.score === null) return { score: null, verdict: "review incomplete" };
+  const verdict = score >= 85 && !hasHigh ? (findings.some((f) => marks[f.id] !== "false_positive") ? "review findings" : "no flags detected") : score >= 60 ? "fix before release" : "high risk";
   return { score, verdict };
 }
 
@@ -81,6 +96,7 @@ export default function App() {
   const [script, setScript] = useState("");
   const [checkBias, setCheckBias] = useState(true);
   const [checkClaims, setCheckClaims] = useState(true);
+  const [checkProfanity, setCheckProfanity] = useState(true);
   const [recheck, setRecheck] = useState(true);
   const [minSec, setMinSec] = useState(2);
   const [minH, setMinH] = useState(2.5);
@@ -126,7 +142,7 @@ export default function App() {
 
   async function run() {
     if (!file) return;
-    if (!checkBias && !checkClaims) {
+    if (!checkBias && !checkClaims && !checkProfanity) {
       setError("Select at least one check.");
       return;
     }
@@ -141,6 +157,7 @@ export default function App() {
     body.append("script", script);
     body.append("check_bias", String(checkBias));
     body.append("check_claims", String(checkClaims));
+    body.append("check_profanity", String(checkProfanity));
     body.append("recheck", String(recheck));
     body.append("min_disclaimer_seconds", String(minSec));
     body.append("min_text_height_pct", String(minH));
@@ -178,6 +195,7 @@ export default function App() {
   return (
     <div className="shell">
       {reviewing ? (
+        <ReviewBoundary key={job?.id} onReset={reset} onExport={() => exportJson(report!, marks, job)}>
         <Review
           report={report!}
           videoUrl={videoUrl!}
@@ -188,6 +206,7 @@ export default function App() {
           onExport={() => exportJson(report!, marks, job)}
           onHome={() => setEntered(false)}
         />
+        </ReviewBoundary>
       ) : (
         <div className="workspace setup">
           <div className="setup-inner">
@@ -201,7 +220,10 @@ export default function App() {
             <UploadPane file={file} videoUrl={videoUrl} onFile={setFile} onSample={() => void loadSample(setFile, setError)} />
             <aside className="side-form">
               {running || job?.status === "error" ? (
-                <StageList stages={job?.stages ?? []} error={job?.error || error} posting={posting && !job} />
+                <>
+                  <StageList stages={job?.stages ?? []} error={job?.error || error} posting={posting && !job} />
+                  {job?.status === "error" && <button type="button" className="ghost retry" onClick={reset}>Back to settings</button>}
+                </>
               ) : (
                 <CheckForm
                   mode={mode}
@@ -214,6 +236,8 @@ export default function App() {
                   setCheckBias={setCheckBias}
                   checkClaims={checkClaims}
                   setCheckClaims={setCheckClaims}
+                  checkProfanity={checkProfanity}
+                  setCheckProfanity={setCheckProfanity}
                   recheck={recheck}
                   setRecheck={setRecheck}
                   minSec={minSec}
@@ -227,6 +251,9 @@ export default function App() {
                   onRun={run}
                 />
               )}
+              {job?.preview && checkProfanity && (
+                <SpeechPreview preview={job.preview} />
+              )}
             </aside>
           </div>
         </div>
@@ -235,70 +262,83 @@ export default function App() {
   );
 }
 
+export function SpeechPreview({ preview }: { preview: NonNullable<Job["preview"]> }) {
+  const flags = preview.profanity_flags ?? [];
+  return (
+    <section className="speech-preview" aria-live="polite">
+      <h2>Speech results</h2>
+      <p className="hint">See the stages above for the full review status.</p>
+      {preview.speech_assessment?.status === "needs_review" && <p className="error">Speech review is incomplete. Check the transcript against the audio.</p>}
+      {preview.profanity_flags == null ? (
+        <p>Bad-word results are not available yet.</p>
+      ) : flags.length ? (
+        <ul>
+          {flags.map((flag, i) => (
+            <li key={i}><span className="mono">{fmt(flag.start)}</span> · {flag.text} · {flag.language}</li>
+          ))}
+        </ul>
+      ) : (
+        <p>{preview.transcript?.segments?.length ? "No known bad words found in the transcript." : "No clear speech detected; bad-word detection could not assess spoken content."}</p>
+      )}
+    </section>
+  );
+}
+
+class ReviewBoundary extends Component<{
+  children: ReactNode;
+  onReset: () => void;
+  onExport: () => void;
+}, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Could not display the analysis report", error, info.componentStack);
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <section className="setup-inner" role="alert">
+        <h1>Could not display this report</h1>
+        <p>The analysis finished, but a display error prevented the report from opening. You can still download the results.</p>
+        <button type="button" className="ghost" onClick={this.props.onExport}>Download results</button>{" "}
+        <button type="button" className="ghost" onClick={this.props.onReset}>Back to settings</button>
+      </section>
+    );
+  }
+}
+
 function Gate({ onEnter }: { onEnter: () => void }) {
-  const [clip, setClip] = useState<"hook" | "claim" | "disc">("disc");
-  const [struck, setStruck] = useState(false);
-  const notes = {
-    hook: "00:00  Hook is fine. The problem is later.",
-    claim: "00:03  “Kills 99.9% germs.” Spoken claim. No source on screen.",
-    disc: "00:11  Disclaimer is on screen for 0.4s. A reader needs 2s, and the type is under 2%.",
-  };
   return (
     <section className="gate">
-      <div className="gate-bg" aria-hidden="true">
-        <video src="/edit.mp4" autoPlay muted loop playsInline />
-        <video src="/ban.mp4" autoPlay muted loop playsInline />
-        <div className="gate-wash" />
-      </div>
-      <div className="bay" aria-hidden="false">
-        <article className="monitor">
-          <header>
-            <span>Edit bay</span>
-            <span className="mono">AD_CUT_07</span>
-          </header>
-          <div className="monitor-screen">
-            <div className="preview-line">
-              <span>NO.1 SOAP</span>
-              <span className="fine">*conditions apply</span>
-            </div>
-            <div className="timeline">
-              <button type="button" className={clip === "hook" ? "on" : ""} onClick={() => setClip("hook")}>
-                Hook
-              </button>
-              <button type="button" className={clip === "claim" ? "on" : ""} onClick={() => setClip("claim")}>
-                Claim
-              </button>
-              <button type="button" className={`bad ${clip === "disc" ? "on" : ""}`} onClick={() => setClip("disc")}>
-                Disclaimer
-              </button>
-              <i className="head" />
-            </div>
-            <p className="note">{notes[clip]}</p>
-          </div>
-        </article>
-
-        <button type="button" className={`notice ${struck ? "struck" : ""}`} onClick={() => setStruck(true)}>
-          <span className="notice-k">Platform review</span>
-          <strong>Ad rejected</strong>
-          <span>Disclaimer too small and too short to read. Page restricted for 7 days.</span>
-          <em>Strike</em>
-        </button>
-      </div>
-
-      <div className="mast">
-        <p className="mast-kicker">Before you post</p>
-        <h1>OnlyUncensored</h1>
-        <p className="mast-line">The cut looks finished. The disclaimer does not. Check it before the platform does.</p>
-        <button type="button" className="enter" onClick={onEnter}>
-          Save yourself
-        </button>
+      <header className="intro-brand">OnlyUncensored<span>Video review, made clearer.</span></header>
+      <div className="intro-body">
+        <div className="mast">
+          <p className="mast-kicker">A closer look before you publish</p>
+          <h1>Check your video.<br /><span>Before you share it.</span></h1>
+          <p className="mast-line">
+            Find bad words, potential bias, and claims that need a second look.
+            Upload your video and get a clear report showing what to review and exactly where to find it.
+          </p>
+          <button type="button" className="enter" onClick={onEnter}>Check a video <span aria-hidden="true">↗</span></button>
+          <p className="intro-languages">Hindi · English · Gujarati</p>
+        </div>
+        <div className="intro-features">
+          <section><span className="intro-number">01 / SPEECH</span><h2>Hear what matters.</h2><p>Turn speech into a transcript and flag known bad words in three languages.</p></section>
+          <section><span className="intro-number">02 / CONTENT</span><h2>Look a little closer.</h2><p>Review potential bias, product claims, and disclaimers that may be too small or too brief.</p></section>
+          <section><span className="intro-number">03 / RESULTS</span><h2>Go straight to the moment.</h2><p>Use timestamps to inspect each finding, review the context, and export your report.</p></section>
+        </div>
       </div>
     </section>
   );
 }
 
 function exportJson(report: Report, marks: Record<string, ReviewMark>, job: Job | null) {
-  const scored = rescore(report.findings, marks);
+  const scored = rescore(report, marks);
   const blob = new Blob(
     [
       JSON.stringify(
@@ -308,6 +348,7 @@ function exportJson(report: Report, marks: Record<string, ReviewMark>, job: Job 
           review: marks,
           score_adjusted: scored.score,
           verdict_adjusted: scored.verdict,
+          review_warnings: speechWarnings(report),
         },
         null,
         2,
@@ -405,6 +446,8 @@ function CheckForm(props: {
   setCheckBias: (v: boolean) => void;
   checkClaims: boolean;
   setCheckClaims: (v: boolean) => void;
+  checkProfanity: boolean;
+  setCheckProfanity: (v: boolean) => void;
   recheck: boolean;
   setRecheck: (v: boolean) => void;
   minSec: number;
@@ -436,7 +479,7 @@ function CheckForm(props: {
             </button>
           ))}
         </div>
-        <p className="hint">{props.mode === "fast" ? "26B · quicker pass" : "31B · higher thinking"}</p>
+        <p className="hint">{props.mode === "fast" ? "Speed-optimized speech decoding and quicker review." : "More thorough speech decoding and deeper review. Try this for difficult regional speech."}</p>
       </fieldset>
 
       <label className="field">
@@ -448,10 +491,21 @@ function CheckForm(props: {
             </option>
           ))}
         </select>
+        <span className="hint">Choose the main spoken language if Auto misses Hindi or Gujarati words.</span>
       </label>
 
       <fieldset>
         <legend>Checks</legend>
+        <button type="button" className="ghost" onClick={() => {
+          props.setCheckProfanity(true);
+          props.setCheckBias(false);
+          props.setCheckClaims(false);
+          props.setMode("fast");
+        }}>Quick setup: bad words only</button>
+        <label className="chk">
+          <input type="checkbox" checked={props.checkProfanity} onChange={(e) => props.setCheckProfanity(e.target.checked)} />
+          Bad words · Hindi, English &amp; Gujarati
+        </label>
         <label className="chk">
           <input type="checkbox" checked={props.checkBias} onChange={(e) => props.setCheckBias(e.target.checked)} />
           Bias
@@ -461,9 +515,10 @@ function CheckForm(props: {
           Claims
         </label>
         <label className="chk">
-          <input type="checkbox" checked={props.recheck} onChange={(e) => props.setRecheck(e.target.checked)} />
+          <input type="checkbox" checked={props.recheck} disabled={!props.checkBias} onChange={(e) => props.setRecheck(e.target.checked)} />
           Recheck bias flags
         </label>
+        <p className="hint">Bad words only uses a local vocabulary scan. With Bias or Claims enabled, the existing speech review also checks context. Review the transcript for missed speech.</p>
       </fieldset>
 
       <fieldset>
@@ -507,6 +562,7 @@ function StageList({ stages, error, posting }: { stages: Stage[]; error: string 
   const weights: Record<string, number> = {
     frames: 10,
     transcribe: 18,
+    profanity: 2,
     visual: 40,
     speech: 16,
     recheck: 12,
@@ -557,7 +613,7 @@ function StageList({ stages, error, posting }: { stages: Stage[]; error: string 
   );
 }
 
-function Review({
+export function Review({
   report,
   videoUrl,
   marks,
@@ -580,7 +636,8 @@ function Review({
   const [now, setNow] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const duration = report.video.duration || 1;
-  const scored = useMemo(() => rescore(report.findings, marks), [report.findings, marks]);
+  const scored = useMemo(() => rescore(report, marks), [report, marks]);
+  const warnings = speechWarnings(report);
 
   const seek = (t: number, id?: string) => {
     const v = videoRef.current;
@@ -661,10 +718,11 @@ function Review({
       <section className="output">
         <div className={`scoreboard v-${scored.verdict.replace(/\s+/g, "-")}`}>
           <div>
-            <p className="kicker">Result</p>
-            <strong>{scored.score}</strong>
+            <p className="kicker">Finding score</p>
+            <strong>{scored.score ?? "—"}</strong>
             <span>{scored.verdict}</span>
-            {scored.score !== report.score && <em>was {report.score}</em>}
+            <p className="hint">Based on detected findings, not an accuracy percentage.</p>
+            {scored.score != null && scored.score !== report.score && report.score != null && <em>was {report.score}</em>}
           </div>
           <div className="score-side">
             <div className="tally">
@@ -686,7 +744,8 @@ function Review({
           </div>
         </div>
         <div className="finding-list">
-          {report.findings.length === 0 && <p className="muted empty">No issues in this run.</p>}
+          {warnings.length > 0 && <section className="review-warnings" role="status"><h2>Speech needs review</h2><ul>{warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul><p>Try selecting Hindi or Gujarati explicitly and use Accurate mode for difficult speech.</p></section>}
+          {report.findings.length === 0 && <p className="muted empty">{warnings.length ? "No findings from the completed checks. The speech review is incomplete." : "No flags detected in the analyzed content. Review the transcript for missed words."}</p>}
           {report.findings.map((f) => (
             <FindingCard
               key={f.id}
@@ -725,6 +784,7 @@ function Lanes({
   onSeek: (t: number, id?: string) => void;
 }) {
   const tracksRef = useRef<HTMLDivElement>(null);
+  const biasLanes = report.settings.check_bias ? BIAS_LANES : [];
   const pct = (t: number) => `${Math.min(100, Math.max(0, (t / duration) * 100))}%`;
   const width = (a: number, b: number) => `${Math.max(0.6, ((Math.max(b, a) - a) / duration) * 100)}%`;
 
@@ -747,12 +807,14 @@ function Lanes({
   return (
     <section className="pane lanes">
       <div className="lane-labs">
-        {BIAS_LANES.map((l) => (
+        {biasLanes.map((l) => (
           <div key={l.key} className="lab">
             <i className={`cdot c-${l.key}`} />
             {l.label}
           </div>
         ))}
+        {report.settings.check_profanity && <div className="lab"><i className="cdot c-profanity" />bad words</div>}
+        {report.settings.check_claims && <>
         <div className="lab">
           <i className="cdot c-claim" />
           claims
@@ -761,10 +823,11 @@ function Lanes({
           <i className="cdot c-disc" />
           disclaimers
         </div>
+        </>}
         <div className="lab dens">risk density</div>
       </div>
       <div className="lane-tracks" ref={tracksRef} onClick={clickTrack}>
-        {BIAS_LANES.map((l) => (
+        {biasLanes.map((l) => (
           <div key={l.key} className="track">
             {report.bias_flags
               .filter((f) => laneOf(f.category) === l.key)
@@ -789,6 +852,19 @@ function Lanes({
               })}
           </div>
         ))}
+        {report.settings.check_profanity && <div className="track">
+          {report.findings.filter((f) => f.kind === "profanity").map((f) => (
+            <button
+              key={f.id}
+              type="button"
+              className={`span c-profanity ${marks[f.id] === "false_positive" ? "fp" : ""} ${selected === f.id ? "sel" : ""}`}
+              style={{ left: pct(f.start), width: width(f.start, f.end) }}
+              title={`${fmt(f.start)} ${(f.detail as ProfanityFlag).text}`}
+              onClick={(e) => { e.stopPropagation(); onSeek(f.start, f.id); }}
+            />
+          ))}
+        </div>}
+        {report.settings.check_claims && <>
         <div className="track">
           {report.claims.map((c, i) => (
             <button
@@ -819,6 +895,7 @@ function Lanes({
             />
           ))}
         </div>
+        </>}
         <div className="track density">
           {density.map((n, i) => (
             <i key={i} style={{ height: `${(n / peak) * 100}%`, opacity: n ? 0.9 : 0.15 }} />
@@ -854,6 +931,7 @@ function FindingCard({
         <span className={`pill ${f.severity}`}>{f.severity}</span>
       </header>
       {f.kind === "bias" && <BiasBody d={f.detail as BiasFlag} />}
+      {f.kind === "profanity" && <ProfanityBody d={f.detail as ProfanityFlag} />}
       {f.kind === "claim" && <ClaimBody d={f.detail as Claim} />}
       {f.kind === "disclaimer" && <DisclaimerBody d={f.detail as DisclaimerSpan} />}
       <footer>
@@ -884,6 +962,17 @@ function BiasBody({ d }: { d: BiasFlag }) {
   );
 }
 
+function ProfanityBody({ d }: { d: ProfanityFlag }) {
+  return (
+    <div className="body">
+      <p><mark>{d.text}</mark></p>
+      <p className="muted">{d.why}</p>
+      <p><span className="k">Fix</span> {d.suggested_fix}</p>
+      <p className="meta">{d.language} · {d.timing_precision === "word" ? "word timestamps" : "approximate segment timestamps"}{d.uncertain ? " · uncertain speech: confirm against audio" : ""}{d.detector === "gemma" ? " · contextual review" : ""}</p>
+    </div>
+  );
+}
+
 function ClaimBody({ d }: { d: Claim }) {
   return (
     <div className="body">
@@ -909,26 +998,42 @@ function DisclaimerBody({ d }: { d: DisclaimerSpan }) {
 
 function TranscriptPane({ report, now, onSeek }: { report: Report; now: number; onSeek: (t: number) => void }) {
   const speechClaims = report.claims.filter((c) => c.source === "speech");
-  if (!report.transcript.segments.length) {
+  const segments = [
+    ...report.transcript.segments.map((segment) => ({ ...segment, uncertain: false })),
+    ...(report.transcript.uncertain_segments ?? []).map((segment) => ({ ...segment, uncertain: true })),
+  ].sort((a, b) => a.start - b.start);
+  if (!segments.length) {
     return <p className="muted empty">{report.transcript.note || report.transcript.error || "No clear speech in this video."}</p>;
   }
   return (
     <div className="transcript">
       {report.transcript.language && <p className="meta">{report.transcript.language}</p>}
-      {report.transcript.segments.map((s, i) => {
-        const hit = speechClaims.some((c) => c.time >= s.start - 0.5 && c.time <= s.end + 0.5);
+      {segments.map((s, i) => {
+        const flags = (report.profanity_flags ?? []).filter((f) => f.start < s.end && f.end > s.start);
+        const hit = speechClaims.some((c) => c.time >= s.start - 0.5 && c.time <= s.end + 0.5)
+          || flags.length > 0;
         const live = now >= s.start && now <= s.end;
         return (
-          <p key={i} className={`speech-line ${hit ? "hit" : ""} ${live ? "live" : ""}`}>
+          <p key={i} className={`speech-line ${hit ? "hit" : ""} ${live ? "live" : ""} ${s.uncertain ? "uncertain" : ""}`}>
             <button type="button" className="ts" onClick={() => onSeek(s.start)}>
               {fmt(s.start)}
             </button>
-            {s.text}
+            {markSpeech(s.text, flags)}
+            {s.uncertain && <span className="speech-confidence">Uncertain speech · check audio</span>}
           </p>
         );
       })}
     </div>
   );
+}
+
+function markSpeech(text: string, flags: ProfanityFlag[]) {
+  const phrases = [...new Set(flags.map((flag) => flag.text.trim()).filter(Boolean))]
+    .sort((a, b) => b.length - a.length)
+    .map((phrase) => phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"));
+  if (!phrases.length) return text;
+  return text.split(new RegExp(`(${phrases.join("|")})`, "giu"))
+    .map((part, i) => i % 2 ? <mark key={i}>{part}</mark> : part);
 }
 
 function ClaimsPane({ report, onSeek }: { report: Report; onSeek: (t: number) => void }) {
@@ -973,7 +1078,7 @@ function RunPane({ report, stages }: { report: Report; stages: Stage[] }) {
       <dd>{s.language}</dd>
       <dt>Checks</dt>
       <dd>
-        {[s.check_bias && "bias", s.check_claims && "claims", s.recheck && "recheck"].filter(Boolean).join(" · ") || "—"}
+        {[s.check_profanity && "bad words", s.check_bias && "bias", s.check_claims && "claims", s.check_bias && s.recheck && "recheck"].filter(Boolean).join(" · ") || "—"}
       </dd>
       <dt>Rules</dt>
       <dd>
@@ -983,6 +1088,8 @@ function RunPane({ report, stages }: { report: Report; stages: Stage[] }) {
       <dd>{report.models.join(", ") || "—"}</dd>
       <dt>Whisper</dt>
       <dd>{report.whisper}</dd>
+      <dt>Bad-word check</dt>
+      <dd>{report.profanity_method === "vocabulary_and_context" ? "Vocabulary + contextual review" : report.profanity_method === "vocabulary" ? "Vocabulary scan" : "Not recorded"}</dd>
       <dt>Frames</dt>
       <dd>
         {report.video.frames_analyzed} @ {report.video.frame_interval}s · {report.visual_batches} batches ·{" "}

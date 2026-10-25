@@ -38,7 +38,7 @@ MODES = {
         "fallback": os.getenv("FAST_FALLBACK_MODEL", "gemma-4-31b-it"),
         "thinking": "minimal",
         "frame_side": 640,
-        "beam_size": 1,
+        "beam_size": 3,
         "batch_frames": 12,
     },
     "accurate": {
@@ -52,7 +52,16 @@ MODES = {
 }
 
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
+WHISPER_FAST_MODEL = os.getenv("WHISPER_FAST_MODEL", "small")
+WHISPER_ACCURATE_MODEL = os.getenv("WHISPER_ACCURATE_MODEL", "medium")
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
+WHISPER_CPU_THREADS = max(1, int(os.getenv("WHISPER_CPU_THREADS", str(min(4, os.cpu_count() or 1)))))
+WHISPER_PRELOAD = os.getenv("WHISPER_PRELOAD", "true").lower() in {"true", "1", "yes"}
+
+
+def speech_model(mode: str) -> str:
+    return WHISPER_FAST_MODEL if mode == "fast" else WHISPER_ACCURATE_MODEL
 
 MAX_FRAMES = int(os.getenv("MAX_FRAMES", "60"))
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "200"))

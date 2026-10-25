@@ -1,17 +1,27 @@
 import logging
 import os
 import tempfile
+import threading
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import jobs
-from .config import MAX_UPLOAD_MB, MODES, WHISPER_MODEL, gemini_api_keys
+from .config import MAX_UPLOAD_MB, MODES, WHISPER_MODEL, WHISPER_PRELOAD, gemini_api_keys, speech_model
 from .options import Options, Rules
+from .transcribe import preload
 
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="adlint")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if WHISPER_PRELOAD:
+        threading.Thread(target=preload, args=(speech_model("fast"),), daemon=True).start()
+    yield
+
+
+app = FastAPI(title="adlint", lifespan=lifespan)
 
 _origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
 _origins += [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
@@ -31,8 +41,10 @@ def health():
     key_count = len(gemini_api_keys())
     return {
         "ok": True,
+        "analysis_version": 2,
         "modes": {k: v["model"] for k, v in MODES.items()},
         "whisper": WHISPER_MODEL,
+        "speech_models": {mode: speech_model(mode) for mode in MODES},
         "api_key_set": key_count > 0,
         "api_key_count": key_count,
     }
@@ -46,18 +58,19 @@ async def create_job(
     script: str = Form(""),
     check_bias: bool = Form(True),
     check_claims: bool = Form(True),
+    check_profanity: bool = Form(True),
     recheck: bool = Form(True),
     min_disclaimer_seconds: float = Form(Rules.min_disclaimer_seconds),
     min_text_height_pct: float = Form(Rules.min_text_height_pct),
     reading_words_per_sec: float = Form(Rules.reading_words_per_sec),
 ):
-    if not gemini_api_keys():
+    if (check_bias or check_claims) and not gemini_api_keys():
         raise HTTPException(500, "No Gemini API key is set in backend/.env")
     if mode not in MODES:
         raise HTTPException(400, f"mode must be one of {list(MODES)}")
     if language not in LANGUAGES:
         raise HTTPException(400, f"language must be one of {list(LANGUAGES)}")
-    if not (check_bias or check_claims):
+    if not (check_bias or check_claims or check_profanity):
         raise HTTPException(400, "Select at least one check")
     if reading_words_per_sec <= 0:
         raise HTTPException(400, "reading_words_per_sec must be positive")
@@ -80,6 +93,7 @@ async def create_job(
         script=script.strip() or None,
         check_bias=check_bias,
         check_claims=check_claims,
+        check_profanity=check_profanity,
         recheck=recheck,
         rules=Rules(
             min_disclaimer_seconds=min_disclaimer_seconds,

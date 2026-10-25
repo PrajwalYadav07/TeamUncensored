@@ -19,6 +19,7 @@ class Options:
     script: str | None = None
     check_bias: bool = True
     check_claims: bool = True
+    check_profanity: bool = True
     recheck: bool = True
     rules: Rules = field(default_factory=Rules)
 

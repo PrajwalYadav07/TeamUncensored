@@ -139,7 +139,7 @@ def _as_obj(data, list_key: str) -> dict:
         if not isinstance(d, dict):
             continue
         wrapped = {k: v for k, v in d.items() if isinstance(v, list)}
-        if wrapped and any(k in d for k in ("bias_flags", "claims", "disclaimers", "verdicts")):
+        if wrapped and any(k in d for k in ("bias_flags", "claims", "disclaimers", "verdicts", "profanity_flags")):
             for k, v in wrapped.items():
                 out.setdefault(k, []).extend(v)
             continue
@@ -149,6 +149,8 @@ def _as_obj(data, list_key: str) -> dict:
             key = "disclaimers"
         elif "category" in d:
             key = "bias_flags"
+        elif "text" in d and "severity" in d and "start" in d:
+            key = "profanity_flags"
         else:
             key = list_key
         out.setdefault(key, []).append(d)
@@ -235,9 +237,14 @@ def visual(frames: list[Frame], opts: Options) -> dict:
 def speech(transcript: dict, opts: Options) -> dict:
     """Text only, which is far cheaper and faster than a call with images."""
     parts = [transcript_block(transcript), *_script_part(opts), "Review this transcript now and return the JSON object."]
-    data, model = _generate(speech_system(opts.check_bias, opts.check_claims), parts, opts)
-    data = _as_obj(data, "claims" if not opts.check_bias else "bias_flags")
-    return {"bias_flags": data.get("bias_flags") or [], "claims": data.get("claims") or [], "model": model}
+    data, model = _generate(speech_system(opts.check_bias, opts.check_claims, opts.check_profanity), parts, opts)
+    list_key = "bias_flags" if opts.check_bias else "claims" if opts.check_claims else "profanity_flags"
+    data = _as_obj(data, list_key)
+    return {
+        "bias_flags": data.get("bias_flags") or [], "claims": data.get("claims") or [], "model": model,
+        "profanity_flags": (data.get("profanity_flags") or []) if opts.check_profanity else [],
+        "profanity_reviewed": opts.check_profanity and isinstance(data.get("profanity_flags"), list),
+    }
 
 
 def verify_bias(flags: list[dict], frames: list[Frame], transcript: dict, interval: float, opts: Options) -> list[dict]:

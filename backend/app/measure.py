@@ -131,9 +131,17 @@ def match_claims(claims: list[dict], spans: list[dict], rules: Rules) -> list[di
     return out
 
 
-def build_report(bias_flags: list[dict], claims: list[dict], spans: list[dict]) -> dict:
+def build_report(bias_flags: list[dict], claims: list[dict], spans: list[dict], profanity_flags: list[dict] | None = None, speech_assessment: dict | None = None) -> dict:
     findings = []
     score = 100
+
+    for i, flag in enumerate(profanity_flags or []):
+        severity = flag["severity"]
+        score -= SEVERITY_PENALTY[severity]
+        findings.append({
+            "id": f"profanity-{i}", "kind": "profanity", "start": flag["start"],
+            "end": flag["end"], "severity": severity, "title": "bad language", "detail": flag,
+        })
 
     for i, f in enumerate(bias_flags):
         sev = f.get("severity") if f.get("severity") in SEVERITY_PENALTY else "medium"
@@ -190,9 +198,12 @@ def build_report(bias_flags: list[dict], claims: list[dict], spans: list[dict]) 
     score = max(0, score)
     has_high = any(f["severity"] == "high" for f in findings)
     if score >= 85 and not has_high:
-        verdict = "ready"
+        verdict = "no flags detected" if not findings else "review findings"
     elif score >= 60:
         verdict = "fix before release"
     else:
         verdict = "high risk"
+    if speech_assessment and speech_assessment["status"] != "complete":
+        score = None
+        verdict = "review incomplete"
     return {"score": score, "verdict": verdict, "findings": findings}

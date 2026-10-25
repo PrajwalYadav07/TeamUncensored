@@ -1,5 +1,5 @@
 export type Severity = "low" | "medium" | "high";
-export type FindingKind = "bias" | "claim" | "disclaimer";
+export type FindingKind = "bias" | "claim" | "disclaimer" | "profanity";
 export type JobStatus = "running" | "done" | "error";
 export type StageState = "pending" | "running" | "done" | "error" | "skipped";
 export type Mode = "fast" | "accurate";
@@ -9,6 +9,7 @@ export interface Word {
   start: number;
   end: number;
   word: string;
+  probability?: number | null;
 }
 
 export interface Segment {
@@ -23,6 +24,13 @@ export interface Transcript {
   segments: Segment[];
   note?: string | null;
   error?: string;
+  language_probability?: number | null;
+  word_probability?: number | null;
+  discarded_segments?: number;
+  speech_seconds?: number | null;
+  audio_seconds?: number | null;
+  speech_padding_seconds?: number;
+  uncertain_segments?: Segment[];
 }
 
 export interface BiasFlag {
@@ -37,6 +45,20 @@ export interface BiasFlag {
   confidence: number;
   verified?: boolean;
   verify_reason?: string;
+}
+
+export interface ProfanityFlag {
+  start: number;
+  end: number;
+  text: string;
+  language: string;
+  severity: Severity;
+  source: string;
+  timing_precision: "word" | "segment";
+  why: string;
+  suggested_fix: string;
+  uncertain?: boolean;
+  detector?: string;
 }
 
 export interface Claim {
@@ -69,7 +91,7 @@ export interface Finding {
   end: number;
   severity: Severity;
   title: string;
-  detail: BiasFlag | Claim | DisclaimerSpan;
+  detail: BiasFlag | Claim | DisclaimerSpan | ProfanityFlag;
 }
 
 export interface Rules {
@@ -84,6 +106,7 @@ export interface ReportSettings {
   mode: Mode;
   check_bias: boolean;
   check_claims: boolean;
+  check_profanity?: boolean;
   recheck: boolean;
   language: string;
   rules: Rules;
@@ -101,10 +124,12 @@ export interface Report {
   video: VideoInfo;
   transcript: Transcript;
   bias_flags: BiasFlag[];
+  // Backends started before bad-word support do not include this field.
+  profanity_flags?: ProfanityFlag[] | null;
   bias_flags_dropped: number;
   claims: Claim[];
   disclaimers: DisclaimerSpan[];
-  score: number;
+  score: number | null;
   verdict: string;
   findings: Finding[];
   settings: ReportSettings;
@@ -112,6 +137,8 @@ export interface Report {
   visual_batches: number;
   whisper: string;
   total_seconds: number;
+  speech_assessment?: { status: "complete" | "needs_review"; reasons: string[] };
+  profanity_method?: "vocabulary" | "vocabulary_and_context" | "not_checked";
 }
 
 export interface Stage {
@@ -127,4 +154,5 @@ export interface Job {
   stages: Stage[];
   result: Report | null;
   error: string | null;
+  preview?: { transcript?: Transcript | null; profanity_flags?: ProfanityFlag[] | null; speech_assessment?: Report["speech_assessment"] } | null;
 }

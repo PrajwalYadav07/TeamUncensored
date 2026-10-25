@@ -22,7 +22,7 @@ class VideoInfo:
     interval: float
 
 
-def sample_frames(path: str, max_side: int = 768) -> tuple[VideoInfo, list[Frame]]:
+def _open_video(path: str):
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError("Could not open video file")
@@ -36,6 +36,19 @@ def sample_frames(path: str, max_side: int = 768) -> tuple[VideoInfo, list[Frame
         cap.release()
         raise ValueError("Video has no readable frames")
 
+    return cap, VideoInfo(round(duration, 2), width, height, round(max(1.0, duration / MAX_FRAMES), 2))
+
+
+def video_info(path: str) -> VideoInfo:
+    """Read metadata without extracting or encoding frames for speech-only checks."""
+    cap, info = _open_video(path)
+    cap.release()
+    return info
+
+
+def sample_frames(path: str, max_side: int = 768) -> tuple[VideoInfo, list[Frame]]:
+    cap, info = _open_video(path)
+    duration, width, height = info.duration, info.width, info.height
     interval = max(1.0, duration / MAX_FRAMES)
     times = []
     t = 0.0
@@ -59,4 +72,4 @@ def sample_frames(path: str, max_side: int = 768) -> tuple[VideoInfo, list[Frame
 
     if not frames:
         raise ValueError("Could not decode any frames")
-    return VideoInfo(round(duration, 2), width, height, round(interval, 2)), frames
+    return info, frames
