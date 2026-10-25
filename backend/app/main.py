@@ -6,7 +6,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import jobs
-from .config import MAX_UPLOAD_MB, MODES, WHISPER_MODEL
+from .config import MAX_UPLOAD_MB, MODES, WHISPER_MODEL, gemini_api_keys
 from .options import Options, Rules
 
 logging.basicConfig(level=logging.INFO)
@@ -24,11 +24,13 @@ LANGUAGES = {"auto": None, "hi": "hi", "en": "en", "gu": "gu"}
 
 @app.get("/api/health")
 def health():
+    key_count = len(gemini_api_keys())
     return {
         "ok": True,
         "modes": {k: v["model"] for k, v in MODES.items()},
         "whisper": WHISPER_MODEL,
-        "api_key_set": bool(os.getenv("GEMINI_API_KEY")),
+        "api_key_set": key_count > 0,
+        "api_key_count": key_count,
     }
 
 
@@ -45,8 +47,8 @@ async def create_job(
     min_text_height_pct: float = Form(Rules.min_text_height_pct),
     reading_words_per_sec: float = Form(Rules.reading_words_per_sec),
 ):
-    if not os.getenv("GEMINI_API_KEY"):
-        raise HTTPException(500, "GEMINI_API_KEY is not set in backend/.env")
+    if not gemini_api_keys():
+        raise HTTPException(500, "No Gemini API key is set in backend/.env")
     if mode not in MODES:
         raise HTTPException(400, f"mode must be one of {list(MODES)}")
     if language not in LANGUAGES:

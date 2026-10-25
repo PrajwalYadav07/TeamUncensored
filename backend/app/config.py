@@ -6,6 +6,30 @@ load_dotenv()
 
 GEMMA_ATTEMPTS = int(os.getenv("GEMMA_ATTEMPTS", "2"))
 
+# Numbered names are checked after GEMINI_API_KEYS. A lone GEMINI_API_KEY still works.
+_GEMINI_KEY_VARS = ("GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3", "GEMINI_API_KEY_4")
+
+
+def gemini_api_keys() -> list[str]:
+    """Configured Gemini keys, in failover order, with duplicates removed."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str | None, *, split: bool) -> None:
+        if not value:
+            return
+        parts = value.split(",") if split else (value,)
+        for part in parts:
+            key = part.strip()
+            if key and key not in seen:
+                seen.add(key)
+                ordered.append(key)
+
+    add(os.getenv("GEMINI_API_KEYS"), split=True)
+    for name in _GEMINI_KEY_VARS:
+        add(os.getenv(name), split=False)
+    return ordered
+
 # 26B is a mixture-of-experts model with ~4B active parameters, so it answers much faster than 31B.
 MODES = {
     "fast": {

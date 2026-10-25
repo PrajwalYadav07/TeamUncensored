@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -8,21 +9,101 @@ import httpx
 from google import genai
 from google.genai import errors, types
 
-from .config import GEMMA_ATTEMPTS
+from .config import GEMMA_ATTEMPTS, gemini_api_keys
 from .frames import Frame
 from .options import Options
 from .prompts import VERIFY_SYSTEM, speech_system, transcript_block, visual_system
 
 log = logging.getLogger(__name__)
 
-_client: genai.Client | None = None
+# Per-minute Gemini limits usually clear within a minute. Daily quota stays failed and the job errors.
+KEY_COOLDOWN_SECONDS = 60.0
+_KEYS_EXHAUSTED = "All Gemini API keys are rate-limited. Add another key or wait and retry."
+_QUOTA_MARKERS = (
+    "resource_exhausted",
+    "resource exhausted",
+    "rate limit",
+    "rate-limit",
+    "rate_limit",
+    "ratelimit",
+    "too many requests",
+    "quota",
+    "exceeded",
+)
 
 
-def client() -> genai.Client:
-    global _client
-    if _client is None:
-        _client = genai.Client()  # reads GEMINI_API_KEY
-    return _client
+class GeminiKeysExhausted(Exception):
+    """Every configured key is in a quota cooldown."""
+
+
+def _is_quota_error(exc: BaseException) -> bool:
+    """Quota and rate limits switch keys. Other google.genai errors do not."""
+    if not isinstance(exc, errors.APIError):
+        return False
+    if str(getattr(exc, "code", "")) == "429":
+        return True
+    parts = [str(getattr(exc, "status", "") or ""), str(getattr(exc, "message", "") or "")]
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        err = details.get("error")
+        source = err if isinstance(err, dict) else details
+        parts.append(str(source.get("status") or ""))
+        parts.append(str(source.get("message") or ""))
+    text = " ".join(parts).lower()
+    if "resource_exhausted" in text or "resource exhausted" in text:
+        return True
+    # "Deadline exceeded" is a transient timeout and stays on the normal retry path.
+    if "deadline exceeded" in text:
+        return False
+    return any(marker in text for marker in _QUOTA_MARKERS)
+
+
+class _KeyPool:
+    """One google-genai client per key. A quota error cools that key and the caller tries the next."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._clients: list[genai.Client] | None = None
+        self._cooled_until: list[float] = []
+
+    def _ensure(self) -> list[genai.Client]:
+        if self._clients is None:
+            keys = gemini_api_keys()
+            self._clients = [genai.Client(api_key=key) for key in keys]
+            self._cooled_until = [0.0] * len(self._clients)
+        return self._clients
+
+    def generate(self, *, model: str, contents, config):
+        with self._lock:
+            clients = self._ensure()
+            if not clients:
+                raise RuntimeError("No Gemini API key is set in backend/.env")
+            now = time.monotonic()
+            indexes = [i for i, until in enumerate(self._cooled_until) if until <= now]
+        if not indexes:
+            raise GeminiKeysExhausted(_KEYS_EXHAUSTED)
+
+        for index in indexes:
+            try:
+                return clients[index].models.generate_content(model=model, contents=contents, config=config)
+            except Exception as exc:
+                if not _is_quota_error(exc):
+                    raise
+                with self._lock:
+                    self._cooled_until[index] = time.monotonic() + KEY_COOLDOWN_SECONDS
+                status = getattr(exc, "status", None) or ""
+                code = getattr(exc, "code", None)
+                log.warning(
+                    "Gemini API key %d/%d hit a quota or rate limit (HTTP %s %s); cooling it down",
+                    index + 1,
+                    len(clients),
+                    code if code is not None else "?",
+                    status,
+                )
+        raise GeminiKeysExhausted(_KEYS_EXHAUSTED)
+
+
+_pool = _KeyPool()
 
 
 def _parse_json(text: str) -> dict:
@@ -90,8 +171,10 @@ def _generate(system: str, parts: list, opts: Options) -> tuple[dict, str]:
     for model in models:
         for attempt in range(GEMMA_ATTEMPTS):
             try:
-                resp = client().models.generate_content(model=model, contents=parts, config=config)
+                resp = _pool.generate(model=model, contents=parts, config=config)
                 return _parse_json(resp.text), model
+            except GeminiKeysExhausted:
+                raise
             except (errors.ServerError, json.JSONDecodeError, httpx.TransportError, OSError) as exc:
                 last_exc = exc
             log.warning("%s attempt %d failed: %s", model, attempt + 1, str(last_exc)[:120])
@@ -181,6 +264,8 @@ def verify_bias(flags: list[dict], frames: list[Frame], transcript: dict, interv
     try:
         data = _as_obj(_generate(VERIFY_SYSTEM, parts, opts)[0], "verdicts")
         verdicts = {v.get("id"): v for v in data.get("verdicts", []) if isinstance(v, dict)}
+    except GeminiKeysExhausted:
+        raise
     except Exception as exc:
         log.warning("Verification pass failed, keeping unverified flags: %s", exc)
         return [{**fl, "verified": False} for fl in flags]
