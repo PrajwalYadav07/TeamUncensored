@@ -21,6 +21,7 @@ export interface Segment {
 export interface Transcript {
   language: string | null;
   segments: Segment[];
+  note?: string | null;
   error?: string;
 }
 

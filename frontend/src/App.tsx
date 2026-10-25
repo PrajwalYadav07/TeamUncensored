@@ -456,7 +456,6 @@ function Review({
   const videoRef = useRef<HTMLVideoElement>(null);
   const [now, setNow] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
-  const [tab, setTab] = useState<"transcript" | "claims" | "run">("transcript");
   const duration = report.video.duration || 1;
   const scored = useMemo(() => rescore(report.findings, marks), [report.findings, marks]);
 
@@ -483,7 +482,7 @@ function Review({
 
   return (
     <div className="workspace review">
-      <div className="col-main">
+      <aside className="rail">
         <section className="pane player">
           <div
             className="video-wrap"
@@ -526,30 +525,29 @@ function Review({
 
         <Lanes report={report} marks={marks} now={now} selected={selected} duration={duration} onSeek={seek} />
 
-        <section className="pane tabs">
-          <nav>
-            {(["transcript", "claims", "run"] as const).map((t) => (
-              <button key={t} type="button" className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
-                {t === "run" ? "Run details" : t[0].toUpperCase() + t.slice(1)}
-              </button>
-            ))}
-          </nav>
-          {tab === "transcript" && <TranscriptPane report={report} now={now} onSeek={seek} />}
-          {tab === "claims" && <ClaimsPane report={report} onSeek={seek} />}
-          {tab === "run" && <RunPane report={report} stages={stages} />}
+        <section className="pane speech">
+          <h2>Speech</h2>
+          <TranscriptPane report={report} now={now} onSeek={seek} />
         </section>
-      </div>
+        <details className="run-fold">
+          <summary>Run details</summary>
+          <RunPane report={report} stages={stages} />
+        </details>
+      </aside>
 
-      <aside className="sidebar">
+      <section className="output">
         <div className={`scoreboard v-${scored.verdict.replace(/\s+/g, "-")}`}>
-          <strong>{scored.score}</strong>
-          <span>{scored.verdict}</span>
-          {scored.score !== report.score && <em>was {report.score}</em>}
-        </div>
-        <div className="tally">
-          <span>{counts.open} open</span>
-          <span>{counts.approved} approved</span>
-          <span>{counts.fp} false pos.</span>
+          <div>
+            <p className="kicker">Result</p>
+            <strong>{scored.score}</strong>
+            <span>{scored.verdict}</span>
+            {scored.score !== report.score && <em>was {report.score}</em>}
+          </div>
+          <div className="tally">
+            <span>{counts.open} open</span>
+            <span>{counts.approved} approved</span>
+            <span>{counts.fp} false pos.</span>
+          </div>
         </div>
         <div className="finding-list">
           {report.findings.length === 0 && <p className="muted empty">No issues in this run.</p>}
@@ -564,7 +562,13 @@ function Review({
             />
           ))}
         </div>
-      </aside>
+        {report.claims.length > 0 && (
+          <div className="claims-block">
+            <h2>Claims</h2>
+            <ClaimsPane report={report} onSeek={seek} />
+          </div>
+        )}
+      </section>
     </div>
   );
 }
@@ -770,16 +774,16 @@ function DisclaimerBody({ d }: { d: DisclaimerSpan }) {
 function TranscriptPane({ report, now, onSeek }: { report: Report; now: number; onSeek: (t: number) => void }) {
   const speechClaims = report.claims.filter((c) => c.source === "speech");
   if (!report.transcript.segments.length) {
-    return <p className="muted empty">{report.transcript.error || "No speech detected."}</p>;
+    return <p className="muted empty">{report.transcript.note || report.transcript.error || "No clear speech in this video."}</p>;
   }
   return (
     <div className="transcript">
-      {report.transcript.language && <p className="meta">lang {report.transcript.language}</p>}
+      {report.transcript.language && <p className="meta">{report.transcript.language}</p>}
       {report.transcript.segments.map((s, i) => {
         const hit = speechClaims.some((c) => c.time >= s.start - 0.5 && c.time <= s.end + 0.5);
         const live = now >= s.start && now <= s.end;
         return (
-          <p key={i} className={`seg ${hit ? "hit" : ""} ${live ? "live" : ""}`}>
+          <p key={i} className={`speech-line ${hit ? "hit" : ""} ${live ? "live" : ""}`}>
             <button type="button" className="ts" onClick={() => onSeek(s.start)}>
               {fmt(s.start)}
             </button>
