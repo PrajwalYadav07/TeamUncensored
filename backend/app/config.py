@@ -30,6 +30,7 @@ def gemini_api_keys() -> list[str]:
         add(os.getenv(name), split=False)
     return ordered
 
+
 # 26B is a mixture-of-experts model with ~4B active parameters, so it answers much faster than 31B.
 MODES = {
     "fast": {

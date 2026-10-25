@@ -52,8 +52,8 @@ def _is_quota_error(exc: BaseException) -> bool:
     text = " ".join(parts).lower()
     if "resource_exhausted" in text or "resource exhausted" in text:
         return True
-    # "Deadline exceeded" is a transient timeout and stays on the normal retry path.
-    if "deadline exceeded" in text:
+    # DEADLINE_EXCEEDED is a transient timeout, not a quota miss.
+    if "deadline" in text and "exceeded" in text:
         return False
     return any(marker in text for marker in _QUOTA_MARKERS)
 
